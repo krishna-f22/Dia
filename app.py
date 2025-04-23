@@ -14,9 +14,7 @@ from dia.model import Dia
 
 # --- Global Setup ---
 parser = argparse.ArgumentParser(description="Gradio interface for Nari TTS")
-parser.add_argument(
-    "--device", type=str, default=None, help="Force device (e.g., 'cuda', 'mps', 'cpu')"
-)
+parser.add_argument("--device", type=str, default=None, help="Force device (e.g., 'cuda', 'mps', 'cpu')")
 parser.add_argument("--share", action="store_true", help="Enable Gradio sharing")
 
 args = parser.parse_args()
@@ -74,15 +72,11 @@ def run_inference(
         if audio_prompt_input is not None:
             sr, audio_data = audio_prompt_input
             # Check if audio_data is valid
-            if (
-                audio_data is None or audio_data.size == 0 or audio_data.max() == 0
-            ):  # Check for silence/empty
+            if audio_data is None or audio_data.size == 0 or audio_data.max() == 0:  # Check for silence/empty
                 gr.Warning("Audio prompt seems empty or silent, ignoring prompt.")
             else:
                 # Save prompt audio to a temporary WAV file
-                with tempfile.NamedTemporaryFile(
-                    mode="wb", suffix=".wav", delete=False
-                ) as f_audio:
+                with tempfile.NamedTemporaryFile(mode="wb", suffix=".wav", delete=False) as f_audio:
                     temp_audio_prompt_path = f_audio.name  # Store path for cleanup
 
                     # Basic audio preprocessing for consistency
@@ -91,16 +85,12 @@ def run_inference(
                         max_val = np.iinfo(audio_data.dtype).max
                         audio_data = audio_data.astype(np.float32) / max_val
                     elif not np.issubdtype(audio_data.dtype, np.floating):
-                        gr.Warning(
-                            f"Unsupported audio prompt dtype {audio_data.dtype}, attempting conversion."
-                        )
+                        gr.Warning(f"Unsupported audio prompt dtype {audio_data.dtype}, attempting conversion.")
                         # Attempt conversion, might fail for complex types
                         try:
                             audio_data = audio_data.astype(np.float32)
                         except Exception as conv_e:
-                            raise gr.Error(
-                                f"Failed to convert audio prompt to float32: {conv_e}"
-                            )
+                            raise gr.Error(f"Failed to convert audio prompt to float32: {conv_e}")
 
                     # Ensure mono (average channels if stereo)
                     if audio_data.ndim > 1:
@@ -109,27 +99,15 @@ def run_inference(
                         elif audio_data.shape[1] == 2:  # Assume (N, 2)
                             audio_data = np.mean(audio_data, axis=1)
                         else:
-                            gr.Warning(
-                                f"Audio prompt has unexpected shape {audio_data.shape}, taking first channel/axis."
-                            )
-                            audio_data = (
-                                audio_data[0]
-                                if audio_data.shape[0] < audio_data.shape[1]
-                                else audio_data[:, 0]
-                            )
-                        audio_data = np.ascontiguousarray(
-                            audio_data
-                        )  # Ensure contiguous after slicing/mean
+                            gr.Warning(f"Audio prompt has unexpected shape {audio_data.shape}, taking first channel/axis.")
+                            audio_data = audio_data[0] if audio_data.shape[0] < audio_data.shape[1] else audio_data[:, 0]
+                        audio_data = np.ascontiguousarray(audio_data)  # Ensure contiguous after slicing/mean
 
                     # Write using soundfile
                     try:
-                        sf.write(
-                            temp_audio_prompt_path, audio_data, sr, subtype="FLOAT"
-                        )  # Explicitly use FLOAT subtype
+                        sf.write(temp_audio_prompt_path, audio_data, sr, subtype="FLOAT")  # Explicitly use FLOAT subtype
                         prompt_path_for_generate = temp_audio_prompt_path
-                        print(
-                            f"Created temporary audio prompt file: {temp_audio_prompt_path} (orig sr: {sr})"
-                        )
+                        print(f"Created temporary audio prompt file: {temp_audio_prompt_path} (orig sr: {sr})")
                     except Exception as write_e:
                         print(f"Error writing temporary audio file: {write_e}")
                         raise gr.Error(f"Failed to save audio prompt: {write_e}")
@@ -164,12 +142,8 @@ def run_inference(
             original_len = len(output_audio_np)
             # Ensure speed_factor is positive and not excessively small/large to avoid issues
             speed_factor = max(0.1, min(speed_factor, 5.0))
-            target_len = int(
-                original_len / speed_factor
-            )  # Target length based on speed_factor
-            if (
-                target_len != original_len and target_len > 0
-            ):  # Only interpolate if length changes and is valid
+            target_len = int(original_len / speed_factor)  # Target length based on speed_factor
+            if target_len != original_len and target_len > 0:  # Only interpolate if length changes and is valid
                 x_original = np.arange(original_len)
                 x_resampled = np.linspace(0, original_len - 1, target_len)
                 resampled_audio_np = np.interp(x_resampled, x_original, output_audio_np)
@@ -177,9 +151,7 @@ def run_inference(
                     output_sr,
                     resampled_audio_np.astype(np.float32),
                 )  # Use resampled audio
-                print(
-                    f"Resampled audio from {original_len} to {target_len} samples for {speed_factor:.2f}x speed."
-                )
+                print(f"Resampled audio from {original_len} to {target_len} samples for {speed_factor:.2f}x speed.")
             else:
                 output_audio = (
                     output_sr,
@@ -188,9 +160,7 @@ def run_inference(
                 print(f"Skipping audio speed adjustment (factor: {speed_factor:.2f}).")
             # --- End slowdown ---
 
-            print(
-                f"Audio conversion successful. Final shape: {output_audio[1].shape}, Sample Rate: {output_sr}"
-            )
+            print(f"Audio conversion successful. Final shape: {output_audio[1].shape}, Sample Rate: {output_sr}")
 
         else:
             print("\nGeneration finished, but no valid tokens were produced.")
@@ -212,19 +182,106 @@ def run_inference(
                 Path(temp_txt_file_path).unlink()
                 print(f"Deleted temporary text file: {temp_txt_file_path}")
             except OSError as e:
-                print(
-                    f"Warning: Error deleting temporary text file {temp_txt_file_path}: {e}"
-                )
+                print(f"Warning: Error deleting temporary text file {temp_txt_file_path}: {e}")
         if temp_audio_prompt_path and Path(temp_audio_prompt_path).exists():
             try:
                 Path(temp_audio_prompt_path).unlink()
                 print(f"Deleted temporary audio prompt file: {temp_audio_prompt_path}")
             except OSError as e:
-                print(
-                    f"Warning: Error deleting temporary audio prompt file {temp_audio_prompt_path}: {e}"
-                )
+                print(f"Warning: Error deleting temporary audio prompt file {temp_audio_prompt_path}: {e}")
 
     return output_audio
+
+
+# Inside app.py
+
+
+def run_streaming_inference(
+    text_input: str,
+    audio_prompt_input: Optional[Tuple[int, np.ndarray]],
+    max_new_tokens: int,
+    cfg_scale: float,
+    temperature: float,
+    top_p: float,
+    cfg_filter_top_k: int,
+    speed_factor: float,
+):
+    """
+    Runs Nari inference in streaming mode, yielding audio chunks progressively.
+    """
+    global model, device  # Access global model, device
+
+    if not text_input or text_input.isspace():
+        raise gr.Error("Text input cannot be empty.")
+
+    temp_audio_prompt_path = None
+    output_sr = 44100  # Sample rate for output audio
+
+    try:
+        # Process audio prompt (if provided) - similar to run_inference
+        prompt_path_for_generate = None
+        if audio_prompt_input is not None:
+            sr, audio_data = audio_prompt_input
+            # Process audio prompt same as in run_inference
+            # ...
+            if audio_data is not None and audio_data.size > 0 and audio_data.max() > 0:
+                with tempfile.NamedTemporaryFile(mode="wb", suffix=".wav", delete=False) as f_audio:
+                    temp_audio_prompt_path = f_audio.name
+                    # Process audio data as in original function
+                    # ...
+                    sf.write(temp_audio_prompt_path, audio_data, sr, subtype="FLOAT")
+                    prompt_path_for_generate = temp_audio_prompt_path
+
+        # Start streaming generation
+        start_time = time.time()
+
+        # Use generator function for streaming
+        for audio_chunk in model.generate_streaming(
+            text_input,
+            max_tokens=max_new_tokens,
+            cfg_scale=cfg_scale,
+            temperature=temperature,
+            top_p=top_p,
+            use_cfg_filter=True,
+            cfg_filter_top_k=cfg_filter_top_k,
+            use_torch_compile=False,
+            audio_prompt_path=prompt_path_for_generate,
+            chunk_size=100,  # Adjust chunk size as needed
+        ):
+            # Apply speed adjustment if needed
+            if speed_factor != 1.0:
+                # Ensure speed_factor is within reasonable bounds
+                speed_factor = max(0.1, min(speed_factor, 5.0))
+                original_len = len(audio_chunk)
+                target_len = int(original_len / speed_factor)
+
+                if target_len != original_len and target_len > 0:
+                    x_original = np.arange(original_len)
+                    x_resampled = np.linspace(0, original_len - 1, target_len)
+                    resampled_audio = np.interp(x_resampled, x_original, audio_chunk)
+                    yield (output_sr, resampled_audio.astype(np.float32))
+                else:
+                    yield (output_sr, audio_chunk)
+            else:
+                yield (output_sr, audio_chunk)
+
+        end_time = time.time()
+        print(f"Streaming generation finished in {end_time - start_time:.2f} seconds.")
+
+    except Exception as e:
+        print(f"Error during streaming inference: {e}")
+        import traceback
+
+        traceback.print_exc()
+        raise gr.Error(f"Streaming inference failed: {e}")
+
+    finally:
+        # Cleanup temporary files
+        if temp_audio_prompt_path and Path(temp_audio_prompt_path).exists():
+            try:
+                Path(temp_audio_prompt_path).unlink()
+            except OSError as e:
+                print(f"Warning: Error deleting temporary audio prompt file {temp_audio_prompt_path}: {e}")
 
 
 # --- Create Gradio Interface ---
@@ -313,16 +370,25 @@ with gr.Blocks(css=css) as demo:
 
             run_button = gr.Button("Generate Audio", variant="primary")
 
+        # with gr.Column(scale=1):
+        #     audio_output = gr.Audio(
+        #         label="Generated Audio",
+        #         type="numpy",
+        #         autoplay=False,
+        #     )
+
         with gr.Column(scale=1):
             audio_output = gr.Audio(
                 label="Generated Audio",
                 type="numpy",
-                autoplay=False,
+                streaming=True,
+                autoplay=True,
             )
 
     # Link button click to function
     run_button.click(
-        fn=run_inference,
+        # fn=run_inference,
+        fn=run_streaming_inference,
         inputs=[
             text_input,
             audio_prompt_input,
@@ -334,7 +400,8 @@ with gr.Blocks(css=css) as demo:
             speed_factor_slider,
         ],
         outputs=[audio_output],  # Add status_output here if using it
-        api_name="generate_audio",
+        # api_name="generate_audio",
+        api_name="generate_streaming_audio",
     )
 
     # Add examples (ensure the prompt path is correct or remove it if example file doesn't exist)
