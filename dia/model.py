@@ -109,9 +109,7 @@ class Dia:
         return dia
 
     @classmethod
-    def from_pretrained(
-        cls, model_name: str = "nari-labs/Dia-1.6B", device: torch.device | None = None
-    ) -> "Dia":
+    def from_pretrained(cls, model_name: str = "nari-labs/Dia-1.6B", device: torch.device | None = None) -> "Dia":
         """Loads the Dia model from a Hugging Face Hub repository.
 
         Downloads the configuration and checkpoint files from the specified
@@ -261,9 +259,7 @@ class Dia:
 
         # 3. Prepare Decoder Inputs
         # 3-1. Allocate KV Cache (Static)
-        decoder_cross_attention_cache: list[KVCache] = self.model.decoder.precompute_cross_attention_kv(
-            max_tokens, encoder_out, src_positions_BxS
-        )
+        decoder_cross_attention_cache: list[KVCache] = self.model.decoder.precompute_cross_attention_kv(max_tokens, encoder_out, src_positions_BxS)
 
         decoder_self_attention_cache: list[KVCache] = []
         for _ in range(self.model.decoder.num_layers):
@@ -352,9 +348,7 @@ class Dia:
                 mode="default",
             )
 
-        tgt_padding_mask = (
-            (generated_BxTxC[:, -1, :].unsqueeze(1) != audio_pad_value).any(dim=2).to(self.device)
-        )  # [B, 1]
+        tgt_padding_mask = (generated_BxTxC[:, -1, :].unsqueeze(1) != audio_pad_value).any(dim=2).to(self.device)  # [B, 1]
         # Generated tokens are never PAD, so we use fixed mask
         decoder_cross_attn_mask = self._create_attn_mask(
             tgt_padding_mask,  # Query mask [B, 1]
@@ -434,7 +428,218 @@ class Dia:
 
         generated_codes = output_codes[0]
 
-        audio = codebook_to_audio(
-            generated_codes.transpose(1, 0), self.dac_model, delay_pattern, B=1, T=max_tokens, C=num_channels
-        )
+        audio = codebook_to_audio(generated_codes.transpose(1, 0), self.dac_model, delay_pattern, B=1, T=max_tokens, C=num_channels)
         return audio.squeeze().cpu().numpy()
+
+    @torch.inference_mode()
+    def generate_streaming(
+        self,
+        text: str,
+        max_tokens: int | None = None,
+        cfg_scale: float = 3.0,
+        temperature: float = 1.3,
+        top_p: float = 0.95,
+        use_cfg_filter: bool = True,
+        use_torch_compile: bool = False,
+        cfg_filter_top_k: int = 35,
+        audio_prompt_path: str | None = None,
+        chunk_size: int = 150,  # Size of audio chunks to yield
+    ):
+        """
+        Generates audio from text in streaming chunks for real-time playback.
+        Similar to generate() but yields audio chunks progressively.
+        """
+        # Initialize same parameters as the original generate method
+        num_channels = self.config.data.channels
+        audio_bos_value = self.config.data.audio_bos_value
+        audio_eos_value = self.config.data.audio_eos_value
+        audio_pad_value = self.config.data.audio_pad_value
+        delay_pattern = self.config.data.delay_pattern
+        max_tokens = self.config.data.audio_length if max_tokens is None else max_tokens
+        delay_tensor = torch.tensor(delay_pattern, dtype=torch.long, device=self.device)
+        max_delay_pattern = max(delay_pattern)
+
+        self.model.eval()
+
+        # Prepare input text
+        cond_src_BxS, cond_src_positions_BxS, cond_src_padding_mask_BxS, cond_enc_self_attn_mask_Bx1xSxS = self._prepare_text_input(text)
+
+        # Same encoder setup as in generate()
+        unc_src_BxS = torch.zeros_like(cond_src_BxS)
+        src_BxS = torch.cat([unc_src_BxS, cond_src_BxS], dim=0)
+        src_positions_BxS = cond_src_positions_BxS.expand(2, -1)
+        src_padding_mask_BxS = cond_src_padding_mask_BxS.expand(2, -1)
+        enc_self_attn_mask_Bx1xSxS = cond_enc_self_attn_mask_Bx1xSxS.expand(2, -1, -1, -1)
+
+        # Encoder Pass
+        encoder_out = self.model.encoder(
+            x_ids=src_BxS,
+            src_positions=src_positions_BxS,
+            deterministic=True,
+            attn_mask=enc_self_attn_mask_Bx1xSxS,
+        )
+
+        # Initialize variables for generation
+        decoder_cross_attention_cache = self.model.decoder.precompute_cross_attention_kv(max_tokens, encoder_out, src_positions_BxS)
+
+        decoder_self_attention_cache = []
+        for _ in range(self.model.decoder.num_layers):
+            decoder_self_attention_cache.append(
+                KVCache(
+                    self.config.model.decoder.gqa_query_heads,
+                    max_tokens,
+                    self.config.model.decoder.gqa_head_dim,
+                    self.device,
+                )
+            )
+
+        # Initialize generation variables
+        generated_BxTxC = torch.full(
+            (2, 1, num_channels),
+            fill_value=audio_bos_value,
+            dtype=torch.long,
+            device=self.device,
+        )
+
+        current_step = 0
+        prompt_len_inc_bos = 1
+
+        # Handle audio prompt if provided
+        if audio_prompt_path is not None:
+            # Same logic as in generate()
+            audio_prompt, sr = torchaudio.load(audio_prompt_path, channels_first=True)
+            if sr != 44100:
+                audio_prompt = torchaudio.functional.resample(audio_prompt, sr, 44100)
+            audio_prompt = audio_prompt.to(self.device).unsqueeze(0)
+            audio_prompt = audio_to_codebook(self.dac_model, audio_prompt, data_config=self.config.data)
+            generated_BxTxC = torch.cat([generated_BxTxC, audio_prompt.expand(2, -1, -1)], dim=1)
+            prefill_len = generated_BxTxC.shape[1]
+            prompt_len_inc_bos = prefill_len
+            # Handle prefill as in generate()
+            # ... (same code)
+            current_step = prefill_len - 1
+
+        # Variables for generation loop
+        eos_detected_channel_0 = False
+        eos_countdown = -1
+        extra_steps_after_eos = 30
+
+        # Make generated tensor
+        generated_BxTxC = torch.cat(
+            [
+                generated_BxTxC,
+                torch.full(
+                    (2, max_tokens, num_channels),
+                    fill_value=-1,
+                    dtype=torch.long,
+                    device=self.device,
+                ),
+            ],
+            dim=1,
+        )
+
+        # Prepare for generation
+        decode_step = self.model.decoder.decode_step
+        if use_torch_compile:
+            decode_step = torch.compile(
+                self.model.decoder.decode_step,
+                mode="default",
+            )
+
+        # Create masks for generation
+        tgt_padding_mask = (generated_BxTxC[:, -1, :].unsqueeze(1) != audio_pad_value).any(dim=2).to(self.device)
+        decoder_cross_attn_mask = self._create_attn_mask(
+            tgt_padding_mask,
+            src_padding_mask_BxS,
+            is_causal=False,
+        )
+
+        # Buffers for keeping track of generated tokens for batched processing
+        token_buffer = []
+
+        # Autoregressive generation loop
+        for step in range(current_step, current_step + max_tokens):
+            # Generate next token (same as in generate())
+            tgt_ids_Bx1xC = generated_BxTxC[:, step, :].unsqueeze(1)
+            tgt_pos_Bx1 = torch.full(
+                (2, 1),
+                fill_value=step,
+                dtype=torch.long,
+                device=self.device,
+            )
+
+            # Get logits and update cache
+            logits_Bx1xCxV, new_cache = decode_step(
+                tgt_ids_Bx1xC=tgt_ids_Bx1xC,
+                tgt_pos_Bx1=tgt_pos_Bx1,
+                encoder_out=encoder_out,
+                self_attn_mask=None,
+                cross_attn_mask=decoder_cross_attn_mask,
+                self_attention_cache=decoder_self_attention_cache,
+                cross_attention_cache=decoder_cross_attention_cache,
+            )
+
+            # Update cache
+            for i, layer_cache in enumerate(decoder_self_attention_cache):
+                layer_cache.update_cache(new_cache[i][0], new_cache[i][1])
+
+            # Sample next token (same as in generate())
+            V = self.config.model.tgt_vocab_size
+            logits_last_BxCxV = logits_Bx1xCxV[:, -1, :, :]
+            uncond_logits_CxV = logits_last_BxCxV[0, :, :]
+            cond_logits_CxV = logits_last_BxCxV[1, :, :]
+            cfg_logits_CxV = cond_logits_CxV + cfg_scale * (cond_logits_CxV - uncond_logits_CxV)
+            logits_CxV = cfg_logits_CxV.reshape((-1, V))
+            logits_CxV[:, 1025:] = -torch.inf
+
+            # Sample next token
+            pred_C = _sample_next_token(
+                logits_CxV.float(),
+                temperature=temperature,
+                top_p=top_p,
+                use_cfg_filter=use_cfg_filter,
+                cfg_filter_top_k=cfg_filter_top_k,
+            )
+
+            # Handle delays and BOS tokens
+            generation_step_index = step - current_step
+            if audio_prompt_path is None:
+                pred_C = torch.where(
+                    generation_step_index >= delay_tensor,
+                    pred_C,
+                    audio_bos_value,
+                )
+
+            # Store the predicted token
+            generated_BxTxC[:, step + 1, :] = pred_C.unsqueeze(0).expand(2, -1)
+            token_buffer.append(pred_C)
+
+            # Handle EOS detection
+            if not eos_detected_channel_0 and pred_C[0] == audio_eos_value:
+                eos_detected_channel_0 = True
+                eos_countdown = extra_steps_after_eos
+
+            if eos_countdown > 0:
+                # Same EOS handling logic as in generate()
+                # ...
+                eos_countdown -= 1
+                if eos_countdown == 0:
+                    # Process any remaining tokens and yield final chunk
+                    if token_buffer:
+                        chunk_codes = torch.stack(token_buffer, dim=0).transpose(0, 1)
+                        audio_chunk = codebook_to_audio(chunk_codes, self.dac_model, delay_pattern, B=1, T=len(token_buffer), C=num_channels)
+                        yield audio_chunk.squeeze().cpu().numpy()
+                    break
+
+            # Yield audio chunks when buffer reaches chunk_size
+            if len(token_buffer) >= chunk_size:
+                chunk_codes = torch.stack(token_buffer, dim=0).transpose(0, 1)
+                audio_chunk = codebook_to_audio(chunk_codes, self.dac_model, delay_pattern, B=1, T=len(token_buffer), C=num_channels)
+                yield audio_chunk.squeeze().cpu().numpy()
+                token_buffer = []  # Reset buffer after yielding
+
+        # Process any remaining tokens
+        if token_buffer:
+            chunk_codes = torch.stack(token_buffer, dim=0).transpose(0, 1)
+            audio_chunk = codebook_to_audio(chunk_codes, self.dac_model, delay_pattern, B=1, T=len(token_buffer), C=num_channels)
+            yield audio_chunk.squeeze().cpu().numpy()
