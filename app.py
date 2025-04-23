@@ -206,10 +206,8 @@ def run_streaming_inference(
     cfg_filter_top_k: int,
     speed_factor: float,
 ):
-    """
-    Runs Nari inference in streaming mode, yielding audio chunks progressively.
-    """
-    global model, device  # Access global model, device
+    """Runs model inference in streaming mode with optimized buffering."""
+    global model, device
 
     if not text_input or text_input.isspace():
         raise gr.Error("Text input cannot be empty.")
@@ -218,24 +216,27 @@ def run_streaming_inference(
     output_sr = 44100  # Sample rate for output audio
 
     try:
-        # Process audio prompt (if provided) - similar to run_inference
+        # Process audio prompt if provided (keep your existing code)
         prompt_path_for_generate = None
         if audio_prompt_input is not None:
             sr, audio_data = audio_prompt_input
-            # Process audio prompt same as in run_inference
-            # ...
             if audio_data is not None and audio_data.size > 0 and audio_data.max() > 0:
                 with tempfile.NamedTemporaryFile(mode="wb", suffix=".wav", delete=False) as f_audio:
                     temp_audio_prompt_path = f_audio.name
-                    # Process audio data as in original function
-                    # ...
                     sf.write(temp_audio_prompt_path, audio_data, sr, subtype="FLOAT")
                     prompt_path_for_generate = temp_audio_prompt_path
 
-        # Start streaming generation
+        # Configure optimal streaming parameters
+        samples_per_second = output_sr
+        min_chunk_duration = 0.2  # 200ms chunks for smooth playback
+        optimal_chunk_samples = int(samples_per_second * min_chunk_duration)
+
+        # Buffer for aggregating audio fragments
+        audio_buffer = np.array([], dtype=np.float32)
+
         start_time = time.time()
 
-        # Use generator function for streaming
+        # Use generate_streaming with optimized chunk sizes
         for audio_chunk in model.generate_streaming(
             text_input,
             max_tokens=max_new_tokens,
@@ -246,24 +247,44 @@ def run_streaming_inference(
             cfg_filter_top_k=cfg_filter_top_k,
             use_torch_compile=False,
             audio_prompt_path=prompt_path_for_generate,
-            chunk_size=100,  # Adjust chunk size as needed
+            chunk_size=150,  # ~300ms of audio per generation chunk
         ):
-            # Apply speed adjustment if needed
-            if speed_factor != 1.0:
-                # Ensure speed_factor is within reasonable bounds
-                speed_factor = max(0.1, min(speed_factor, 5.0))
-                original_len = len(audio_chunk)
-                target_len = int(original_len / speed_factor)
+            # Add new chunk to buffer
+            audio_buffer = np.concatenate([audio_buffer, audio_chunk])
 
-                if target_len != original_len and target_len > 0:
-                    x_original = np.arange(original_len)
-                    x_resampled = np.linspace(0, original_len - 1, target_len)
-                    resampled_audio = np.interp(x_resampled, x_original, audio_chunk)
-                    yield (output_sr, resampled_audio.astype(np.float32))
-                else:
-                    yield (output_sr, audio_chunk)
-            else:
-                yield (output_sr, audio_chunk)
+            # When buffer reaches target size, yield a chunk
+            while len(audio_buffer) >= optimal_chunk_samples:
+                # Extract a chunk of consistent size
+                chunk_to_yield = audio_buffer[:optimal_chunk_samples]
+                audio_buffer = audio_buffer[optimal_chunk_samples:]
+
+                # Apply speed adjustment if needed
+                if speed_factor != 1.0:
+                    # Keep your existing speed adjustment code
+                    speed_factor = max(0.1, min(speed_factor, 5.0))
+                    original_len = len(chunk_to_yield)
+                    target_len = int(original_len / speed_factor)
+
+                    if target_len != original_len and target_len > 0:
+                        x_original = np.arange(original_len)
+                        x_resampled = np.linspace(0, original_len - 1, target_len)
+                        chunk_to_yield = np.interp(x_resampled, x_original, chunk_to_yield)
+
+                # Properly normalize and convert to int16 to avoid warnings
+                max_val = max(0.01, np.max(np.abs(chunk_to_yield)))
+                normalized_chunk = chunk_to_yield / max_val * 0.9  # Avoid clipping
+                int16_chunk = (normalized_chunk * 32767).astype(np.int16)
+
+                yield (output_sr, int16_chunk)
+
+        # Yield any remaining audio in the buffer
+        if len(audio_buffer) > 0:
+            # Normalize and convert to int16
+            max_val = max(0.01, np.max(np.abs(audio_buffer)))
+            normalized_chunk = audio_buffer / max_val * 0.9
+            int16_chunk = (normalized_chunk * 32767).astype(np.int16)
+
+            yield (output_sr, int16_chunk)
 
         end_time = time.time()
         print(f"Streaming generation finished in {end_time - start_time:.2f} seconds.")
@@ -369,13 +390,6 @@ with gr.Blocks(css=css) as demo:
                 )
 
             run_button = gr.Button("Generate Audio", variant="primary")
-
-        # with gr.Column(scale=1):
-        #     audio_output = gr.Audio(
-        #         label="Generated Audio",
-        #         type="numpy",
-        #         autoplay=False,
-        #     )
 
         with gr.Column(scale=1):
             audio_output = gr.Audio(

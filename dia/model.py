@@ -443,13 +443,10 @@ class Dia:
         use_torch_compile: bool = False,
         cfg_filter_top_k: int = 35,
         audio_prompt_path: str | None = None,
-        chunk_size: int = 150,  # Size of audio chunks to yield
+        chunk_size: int = 1500,  # Size of audio chunks to yield
     ):
-        """
-        Generates audio from text in streaming chunks for real-time playback.
-        Similar to generate() but yields audio chunks progressively.
-        """
-        # Initialize same parameters as the original generate method
+        """Generates audio from text in streaming chunks for real-time playback."""
+        # Initialize parameters (keep existing code from generate method)
         num_channels = self.config.data.channels
         audio_bos_value = self.config.data.audio_bos_value
         audio_eos_value = self.config.data.audio_eos_value
